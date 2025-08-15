@@ -10,7 +10,7 @@ command_exists() {
 }
 
 # Check for required tools
-for cmd in wget dd xz lsblk sha256sum partprobe jq openssl pv; do
+for cmd in wget dd xz lsblk sha256sum partprobe jq openssl pv numfmt; do
     if ! command_exists "$cmd"; then
         echo "Error: $cmd is not installed. Please install it (e.g., 'sudo apt install $cmd')."
         exit 1
@@ -179,14 +179,19 @@ if [ "$format_confirm" = "y" ] || [ "$format_confirm" = "Y" ]; then
     sleep 2
     
     # Format the first partition as FAT32
-    if [ -b "${sd_card}1" ]; then
-        echo "Formatting ${sd_card}1 as FAT32..."
-        sudo mkfs.vfat -F 32 "${sd_card}1" || {
-            echo "Warning: FAT32 formatting failed. Continuing with existing format..."
-        }
+if [ -b "${sd_card}1" ]; then
+    echo "Formatting ${sd_card}1 as FAT32..."
+    sudo mkfs.vfat -F 32 "${sd_card}1" 2>&1 | tee /tmp/mkfs_output.log
+    
+    if [ ${PIPESTATUS[0]} -eq 0 ]; then
+        echo "FAT32 formatting completed successfully."
     else
-        echo "Warning: Partition ${sd_card}1 not found. Continuing with existing format..."
+        echo "Warning: FAT32 formatting had issues. Check /tmp/mkfs_output.log for details."
+        echo "Continuing with existing format..."
     fi
+else
+    echo "Warning: Partition ${sd_card}1 not found. Continuing with existing format..."
+fi
 fi
 
 # Final confirmation before flashing
@@ -319,10 +324,33 @@ sudo umount "${sd_card}"* 2>/dev/null || true
 
 # Write the image to the SD card with pv for progress bar
 echo "Writing $image_file to $sd_card..."
+echo "This may take several minutes. Please wait..."
+
+# Check if image file exists and has size
+if [ ! -f "$image_file" ]; then
+    echo "Error: Image file $image_file not found!"
+    cleanup_and_exit 1 "failed"
+fi
+
+image_size=$(stat -c %s "$image_file" 2>/dev/null || stat -f %z "$image_file" 2>/dev/null || echo "0")
+if [ "$image_size" -eq 0 ]; then
+    echo "Error: Image file $image_file has zero size!"
+    cleanup_and_exit 1 "failed"
+fi
+
+echo "Image size: $(numfmt --to=iec-i --suffix=B $image_size)"
+echo "Starting write operation..."
+
 if command_exists pv; then
-    sudo pv "$image_file" | sudo dd bs=4M of="$sd_card" conv=fsync
+    sudo pv -s "$image_size" "$image_file" | sudo dd bs=4M of="$sd_card" conv=fsync
 else
     sudo dd bs=4M if="$image_file" of="$sd_card" conv=fsync status=progress
+fi
+
+# Check if write was successful
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to write image to SD card!"
+    cleanup_and_exit 1 "failed"
 fi
 
 # Sync to ensure all data is written
