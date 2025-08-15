@@ -17,6 +17,37 @@ for cmd in wget dd xz lsblk sha256sum partprobe jq openssl pv; do
     fi
 done
 
+# Function to cleanup and exit on error
+cleanup_and_exit() {
+    local exit_code=$1
+    local status=${2:-"failed"}
+    
+    echo "Flash operation $status. Cleaning up..."
+    
+    # Always remove decompressed image file
+    if [ -f "$image_file" ]; then
+        rm -f "$image_file"
+        echo "Removed decompressed image: $image_file"
+    fi
+    
+    # Clean up downloaded files if they exist
+    if [ -z "$local_image" ]; then
+        rm -f "raspios-lite-latest.img.xz" "raspios-lite-latest.sha256"
+        if [ -n "$downloaded_xz" ]; then
+            rm -f "$downloaded_xz"
+        fi
+    fi
+    
+    # Set flash status and save config
+    last_flash_status="$status"
+    write_config
+    
+    exit "$exit_code"
+}
+
+# Set trap to cleanup on exit
+trap 'cleanup_and_exit 1 "failed"' EXIT
+
 # Configuration owner (prefer invoking non-root user when run with sudo)
 config_owner="${SUDO_USER:-$USER}"
 config_owner_home=$(getent passwd "$config_owner" | cut -d: -f6 2>/dev/null)
@@ -56,7 +87,9 @@ write_config() {
         --arg confirm_erase "${confirm:-N}" \
         --arg confirm_format "${format_confirm:-N}" \
         --arg confirm_flash "${flash_confirm:-N}" \
-        '{username:$username, arch:$arch, static_ip:$static_ip, gateway_ip:$gateway_ip, subnet_mask:$subnet_mask, dns_server:$dns_server, local_image:$local_image, password:$password, confirm_erase:$confirm_erase, confirm_format:$confirm_format, confirm_flash:$confirm_flash}')
+        --arg last_flash_status "${last_flash_status:-unknown}" \
+        --arg last_flash_date "$(date -Iseconds)" \
+        '{username:$username, arch:$arch, static_ip:$static_ip, gateway_ip:$gateway_ip, subnet_mask:$subnet_mask, dns_server:$dns_server, local_image:$local_image, password:$password, confirm_erase:$confirm_erase, confirm_format:$confirm_format, confirm_flash:$confirm_flash, last_flash_status:$last_flash_status, last_flash_date:$last_flash_date}')
     echo "$persist_json" > "$config_file"
     if [ -n "$config_owner" ] && [ "$config_owner" != "root" ]; then
         chown "$config_owner":"$config_owner" "$config_file" 2>/dev/null || true
@@ -405,7 +438,12 @@ sudo eject "$sd_card" || true
 
 # Clean up
 echo "Cleaning up..."
-rm -f "$image_file"
+# Always remove decompressed image file, whether local or downloaded
+if [ -f "$image_file" ]; then
+    rm -f "$image_file"
+    echo "Removed decompressed image: $image_file"
+fi
+
 if [ -z "$local_image" ]; then
     # Clean up downloaded artifacts regardless of renamed filename
     rm -f "raspios-lite-latest.img.xz" "raspios-lite-latest.sha256"
@@ -414,6 +452,9 @@ if [ -z "$local_image" ]; then
     fi
 fi
 
+# Remove trap since we're exiting normally
+trap - EXIT
+
 echo "SD card has been formatted, flashed, and configured successfully!"
 echo "You can now remove the SD card and insert it into your Raspberry Pi."
 if [ -n "$static_ip" ]; then
@@ -421,6 +462,9 @@ if [ -n "$static_ip" ]; then
 else
     echo "Try SSH with: ssh $username@<Raspberry Pi IP>"
 fi
+
+# Set flash status to success
+last_flash_status="success"
 
 # Persist configuration for next run
 write_config
