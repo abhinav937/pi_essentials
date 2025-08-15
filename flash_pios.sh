@@ -290,11 +290,16 @@ if [ -n "$local_image" ]; then
                 echo "Using pv for decompression progress..."
                 echo "pv decompression command: pv -s $compressed_size $local_image | xz -dc > $image_file"
                 
-                # Now do the actual decompression with progress to terminal
-                if ! pv -s "$compressed_size" "$local_image" 2>&1 | xz -dc > "$image_file"; then
+                # Force unbuffered output and show progress
+                echo "Starting decompression with progress display..."
+                echo "Progress: ["
+                
+                # Use pv with explicit progress display
+                if ! pv -s "$compressed_size" -F "%N %b %t %r %e %p" "$local_image" 2>&1 | xz -dc > "$image_file"; then
                     echo "Error: Failed to decompress $local_image."
                     cleanup_and_exit 1 "failed"
                 fi
+                echo "] Decompression completed successfully!"
             else
                 # Fallback to xz with verbose output
                 if ! xz -dkv "$local_image"; then
@@ -378,9 +383,14 @@ if command_exists pv; then
     echo "pv version: $(pv --version | head -1)"
     echo "pv command: pv -s $image_size -p -t -e -r $image_file"
     echo "Starting pv transfer..."
+    echo "Progress: ["
     
     # Force progress output to terminal and do the actual transfer
-    sudo pv -s "$image_size" -p -t -e -r "$image_file" 2>&1 | sudo dd bs=4M of="$sd_card" conv=fsync
+    if ! sudo pv -s "$image_size" -p -t -e -r "$image_file" 2>&1 | sudo dd bs=4M of="$sd_card" conv=fsync; then
+        echo "Error: Failed to write image to SD card!"
+        cleanup_and_exit 1 "failed"
+    fi
+    echo "] Write completed successfully!"
 else
     echo "pv not available, using dd with progress..."
     sudo dd bs=4M if="$image_file" of="$sd_card" conv=fsync status=progress
@@ -509,12 +519,15 @@ sudo eject "$sd_card" || true
 
 # Clean up
 echo "Cleaning up..."
+echo "Removing temporary files..."
+
 # Always remove decompressed image file, whether local or downloaded
 if [ -f "$image_file" ]; then
     rm -f "$image_file"
     echo "Removed decompressed image: $image_file"
 fi
 
+# Clean up downloaded files if they exist
 if [ -z "$local_image" ]; then
     # Clean up downloaded artifacts regardless of renamed filename
     rm -f "raspios-lite-latest.img.xz" "raspios-lite-latest.sha256"
@@ -522,6 +535,11 @@ if [ -z "$local_image" ]; then
         rm -f "$downloaded_xz"
     fi
 fi
+
+# Clean up any other temporary files that might exist
+rm -f "raspios-lite-latest.img" "*.log" "*.tmp" 2>/dev/null || true
+
+echo "Cleanup completed. Only original image files remain."
 
 # Remove trap since we're exiting normally
 trap - EXIT
