@@ -280,11 +280,6 @@ if [ -n "$local_image" ]; then
             
             if command_exists pv; then
                 # Use pv to show decompression progress
-                echo "Using pv for decompression progress..."
-                echo "pv decompression command: pv -s $compressed_size $local_image | xz -dc > $image_file"
-                
-                # Force unbuffered output and show progress
-                echo "Starting decompression with progress display..."
                 echo "Progress: ["
                 
                 # Use pv with explicit progress display and force unbuffered output
@@ -372,10 +367,6 @@ echo "Starting write operation..."
 
 # Use pv with better progress display
 if command_exists pv; then
-    echo "Using pv for progress display..."
-    echo "pv version: $(pv --version | head -1)"
-    echo "pv command: pv -s $image_size -p -t -e -r -f -B 65536 $image_file"
-    echo "Starting pv transfer..."
     echo "Progress: ["
 
     # Force progress output and reduce buffering
@@ -494,10 +485,18 @@ fi
 # Configure static IP (if provided)
 if [ -n "$static_ip" ]; then
     echo "Configuring static IP $static_ip..."
+    
+    # Check if dhcpcd.conf exists, create if it doesn't
+    if [ ! -f "$root_mnt/etc/dhcpcd.conf" ]; then
+        echo "Creating dhcpcd.conf file..."
+        sudo touch "$root_mnt/etc/dhcpcd.conf"
+    fi
+    
     if grep -q "interface eth0" "$root_mnt/etc/dhcpcd.conf"; then
         echo "Warning: Existing eth0 configuration found in dhcpcd.conf. Skipping static IP setup."
     else
         echo -e "\ninterface eth0\nstatic ip_address=$static_ip/$subnet_mask\nstatic routers=$gateway_ip\nstatic domain_name_servers=$dns_server" | sudo tee -a "$root_mnt/etc/dhcpcd.conf" >/dev/null
+        echo "Static IP configuration added to dhcpcd.conf"
     fi
 fi
 
