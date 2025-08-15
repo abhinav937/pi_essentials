@@ -277,10 +277,45 @@ if [ -n "$local_image" ]; then
     if [[ "$local_image" == *.img.xz ]]; then
         echo "Decompressing local image $local_image..."
         image_file="${local_image%.xz}"
-        if ! xz -dk "$local_image"; then
-            echo "Error: Failed to decompress $local_image."
-            exit 1
+        
+        # Get compressed file size for progress display
+        compressed_size=$(stat -c %s "$local_image" 2>/dev/null || stat -f %z "$local_image" 2>/dev/null || echo "0")
+        
+        if [ "$compressed_size" -gt 0 ]; then
+            echo "Compressed size: $(numfmt --to=iec-i --suffix=B $compressed_size)"
+            echo "Decompressing with progress..."
+            
+            if command_exists pv; then
+                # Use pv to show decompression progress
+                echo "Using pv for decompression progress..."
+                echo "pv decompression command: pv -s $compressed_size $local_image | xz -dc > $image_file"
+                
+                # Test pv output first
+                echo "Testing pv decompression output:"
+                pv -s "$compressed_size" "$local_image" | head -c 1M > /dev/null
+                echo "pv decompression test completed"
+                
+                # Now do the actual decompression
+                if ! pv -s "$compressed_size" "$local_image" | xz -dc > "$image_file"; then
+                    echo "Error: Failed to decompress $local_image."
+                    cleanup_and_exit 1 "failed"
+                fi
+            else
+                # Fallback to xz with verbose output
+                if ! xz -dkv "$local_image"; then
+                    echo "Error: Failed to decompress $local_image."
+                    cleanup_and_exit 1 "failed"
+                fi
+            fi
+        else
+            # Fallback if size detection fails
+            if ! xz -dk "$local_image"; then
+                echo "Error: Failed to decompress $local_image."
+                cleanup_and_exit 1 "failed"
+            fi
         fi
+        
+        echo "Decompression completed: $image_file"
     else
         image_file="$local_image"
     fi
@@ -345,6 +380,16 @@ echo "Starting write operation..."
 # Use pv with better progress display
 if command_exists pv; then
     echo "Using pv for progress display..."
+    echo "pv version: $(pv --version | head -1)"
+    echo "pv command: pv -s $image_size -p -t -e -r $image_file"
+    echo "Starting pv transfer..."
+    
+    # Test pv output first
+    echo "Testing pv output:"
+    pv -s "$image_size" -p -t -e -r "$image_file" | head -c 1M > /dev/null
+    echo "pv test completed"
+    
+    # Now do the actual transfer
     sudo pv -s "$image_size" -p -t -e -r "$image_file" | sudo dd bs=4M of="$sd_card" conv=fsync
 else
     echo "pv not available, using dd with progress..."
