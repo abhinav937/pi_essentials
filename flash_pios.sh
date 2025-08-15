@@ -167,7 +167,7 @@ cleanup_and_exit() {
     # Provide recovery guidance based on device type
     if [ -n "$device_type" ]; then
         echo ""
-        echo "${CYAN}*** Recovery Guidance ***${NC}"
+        echo -e "${CYAN}*** Recovery Guidance ***${NC}"
         if [ "$device_type" = "flash_drive" ]; then
             echo "  • This was a flash drive. To recover it for future use:"
             echo "    sudo dd if=/dev/zero of=$sd_card bs=1M count=1 conv=notrunc"
@@ -483,52 +483,56 @@ download_image() {
     if [ -n "$local_image" ]; then
         # Validate local image
         if [ ! -f "$local_image" ]; then
-            log "Error: Local image file $local_image does not exist."
+            log "$LOG_ERROR" "Local image file $local_image does not exist."
             return 1
         fi
         if [[ "$local_image" != *.img && "$local_image" != *.img.xz ]]; then
-            log "Error: Local image must have a .img or .img.xz extension."
-            return 1
-        fi
-        log "Using local image: $local_image"
+                    log "$LOG_ERROR" "Local image must have a .img or .img.xz extension."
+        return 1
+    fi
+    log "$LOG_INFO" "Using local image: $local_image"
+    
+    if [[ "$local_image" == *.img.xz ]]; then
+        log "$LOG_INFO" "Decompressing local image $local_image..."
+        image_file="${local_image%.xz}"
         
-        if [[ "$local_image" == *.img.xz ]]; then
-            log "Decompressing local image $local_image..."
-            image_file="${local_image%.xz}"
+        # Get compressed file size for progress display
+        compressed_size=$(stat -c %s "$local_image" 2>/dev/null || stat -f %z "$local_image" 2>/dev/null || echo "0")
+        
+        if [ "$compressed_size" -gt 0 ]; then
+            log "$LOG_INFO" "Compressed size: $(numfmt --to=iec-i --suffix=B $compressed_size)"
+            log "$LOG_INFO" "Decompressing with progress..."
             
-            # Get compressed file size for progress display
-            compressed_size=$(stat -c %s "$local_image" 2>/dev/null || stat -f %z "$local_image" 2>/dev/null || echo "0")
-            
-            if [ "$compressed_size" -gt 0 ]; then
-                log "Compressed size: $(numfmt --to=iec-i --suffix=B $compressed_size)"
-                log "Decompressing with progress..."
+            if command_exists pv; then
+                # Use pv to show decompression progress
+                echo ""
+                echo "Progress: ["
+                echo ""
                 
-                if command_exists pv; then
-                    # Use pv to show decompression progress
-                    echo "Progress: ["
-                    
-                    # Use pv with explicit progress display and force unbuffered output
-                    if ! stdbuf -oL pv -s "$compressed_size" -p -t -e -r -f -B 65536 "$local_image" 2>/dev/tty | xz -dc > "$image_file"; then
-                        log "Error: Failed to decompress $local_image."
-                        return 1
-                    fi
-                    echo "] Decompression completed successfully!"
-                else
-                    # Fallback to xz with verbose output
-                    if ! xz -dkv "$local_image"; then
-                        log "Error: Failed to decompress $local_image."
-                        return 1
-                    fi
+                # Use pv with explicit progress display and force unbuffered output
+                if ! stdbuf -oL pv -s "$compressed_size" -p -t -e -r -f -B 65536 "$local_image" 2>/dev/tty | xz -dc > "$image_file"; then
+                    log "$LOG_ERROR" "Failed to decompress $local_image."
+                    return 1
                 fi
+                echo ""
+                echo "] Decompression completed successfully!"
+                echo ""
             else
-                # Fallback if size detection fails
-                if ! xz -dk "$local_image"; then
-                    log "Error: Failed to decompress $local_image."
+                # Fallback to xz with verbose output
+                if ! xz -dkv "$local_image"; then
+                    log "$LOG_ERROR" "Failed to decompress $local_image."
                     return 1
                 fi
             fi
-            
-            log "Decompression completed: $image_file"
+        else
+            # Fallback if size detection fails
+            if ! xz -dk "$local_image"; then
+                log "$LOG_ERROR" "Failed to decompress $local_image."
+                return 1
+            fi
+        fi
+        
+        log "$LOG_INFO" "Decompression completed: $image_file"
         else
             image_file="$local_image"
         fi
@@ -548,7 +552,7 @@ download_image() {
         
         # Verify the download
         if [ ! -f "raspios-lite-latest.img.xz" ] || [ ! -f "raspios-lite-latest.sha256" ]; then
-            log "Error: Download failed."
+            log "$LOG_ERROR" "Download failed."
             return 1
         fi
         
@@ -562,7 +566,7 @@ download_image() {
         
         log "Verifying image integrity..."
         if ! sha256sum -c raspios-lite-latest.sha256; then
-            log "Error: Image verification failed."
+            log "$LOG_ERROR" "Image verification failed."
             return 1
         fi
         
@@ -585,13 +589,13 @@ write_image() {
     
     # Check if image file exists and has size
     if [ ! -f "$image_file" ]; then
-        log "Error: Image file $image_file not found!"
+        log "$LOG_ERROR" "Image file $image_file not found!"
         return 1
     fi
     
     image_size=$(stat -c %s "$image_file" 2>/dev/null || stat -f %z "$image_file" 2>/dev/null || echo "0")
     if [ "$image_size" -eq 0 ]; then
-        log "Error: Image file $image_file has zero size!"
+        log "$LOG_ERROR" "Image file $image_file has zero size!"
         return 1
     fi
     
@@ -600,28 +604,32 @@ write_image() {
     
     # Use pv with better progress display
     if command_exists pv; then
+        echo ""
         echo "Progress: ["
+        echo ""
         
         # Force progress output and reduce buffering
         if ! stdbuf -oL pv -s "$image_size" -p -t -e -r -f -B 65536 "$image_file" 2>/dev/tty | sudo dd bs=4M of="$sd_card" conv=fsync; then
-            log "Error: Failed to write image to SD card!"
+            log "$LOG_ERROR" "Failed to write image to SD card!"
             return 1
         fi
+        echo ""
         echo "] Write completed successfully!"
+        echo ""
     else
-        log "pv not available, using dd with progress..."
+        log "$LOG_INFO" "pv not available, using dd with progress..."
         sudo dd bs=4M if="$image_file" of="$sd_card" conv=fsync status=progress
     fi
     
     # Check if write was successful
     if [ $? -ne 0 ]; then
-        log "Error: Failed to write image to SD card!"
+        log "$LOG_ERROR" "Failed to write image to SD card!"
         return 1
     fi
     
     # Sync to ensure all data is written
     sync
-    log "Image written successfully to $sd_card"
+    log "$LOG_INFO" "Image written successfully to $sd_card"
     return 0
 }
 
@@ -638,11 +646,19 @@ fi
 # Automatically detect block devices (prefer removable, exclude boot device)
 log "$LOG_INFO" "Detecting block devices..."
 mapfile -t devices < <(lsblk -J -o NAME,SIZE,RM,MODEL,MOUNTPOINTS,TYPE | jq -r --arg bootdev "$boot_device" '.blockdevices[] | select(.name != $bootdev and .name != "") | select(.rm == true or .rm == "1") | "\(.name) \(.size) \(.model // "Unknown") \(.mountpoints | join(",")) \(.type)"' 2>/dev/null)
+
+# If no removable devices found, check for USB devices by model name
 if [ ${#devices[@]} -eq 0 ]; then
-    log "$LOG_WARN" "No removable block devices found. Listing all available block devices (excluding $boot_device):"
+    log "$LOG_INFO" "No removable block devices found. Checking for USB devices by model..."
+    mapfile -t devices < <(lsblk -J -o NAME,SIZE,RM,MODEL,MOUNTPOINTS,TYPE | jq -r --arg bootdev "$boot_device" '.blockdevices[] | select(.name != $bootdev and .name != "") | select(.model | test("Flash|USB|Pen|Drive|Disk|SanDisk|Kingston|PNY|Corsair|Crucial|Samsung|Toshiba|Western Digital|WD|Seagate"; "i")) | "\(.name) \(.size) \(.model // "Unknown") \(.mountpoints | join(",")) \(.type)"' 2>/dev/null)
+fi
+
+# If still no devices found, list all available block devices
+if [ ${#devices[@]} -eq 0 ]; then
+    log "$LOG_WARN" "No removable or USB devices found. Listing all available block devices (excluding $boot_device):"
     mapfile -t devices < <(lsblk -J -o NAME,SIZE,MODEL,MOUNTPOINTS,TYPE | jq -r --arg bootdev "$boot_device" '.blockdevices[] | select(.name != $bootdev and .name != "") | "\(.name) \(.size) \(.model // "Unknown") \(.mountpoints | join(",")) \(.type)"' 2>/dev/null)
     if [ ${#devices[@]} -eq 0 ]; then
-        log "$LOG_ERROR" "No block devices found. Please insert an SD card or flash drive."
+        log "$LOG_ERROR" "No block devices found. Please insert an SD card or USB drive."
         exit 1
     fi
 fi
@@ -655,45 +671,150 @@ else
     select_device "${devices[@]}"
 fi
 
-# Show device size
+# Show device size and analyze device characteristics
 size=$(lsblk -b -o SIZE "$sd_card" | tail -n 1)
 size_gb=$(echo "scale=1; $size / 1024 / 1024 / 1024" | bc -l 2>/dev/null || echo "unknown")
 log "$LOG_INFO" "Selected device: $sd_card (${size_gb} GB)"
 
+# Smart formatting decision based on device type and size
+log "$LOG_INFO" "Analyzing device characteristics..."
+device_size_gb=$(echo "scale=1; $size / 1024 / 1024 / 1024" | bc -l 2>/dev/null || echo "0")
+device_type="unknown"
+
+# Get device characteristics
+is_removable=$(lsblk -J -o NAME,RM "$sd_card" | jq -r --arg dev "$(basename "$sd_card")" '.blockdevices[] | select(.name == $dev) | .rm' 2>/dev/null || echo "0")
+device_model=$(lsblk -J -o NAME,MODEL "$sd_card" | jq -r --arg dev "$(basename "$sd_card")" '.blockdevices[] | select(.name == $dev) | .model // "Unknown"' 2>/dev/null || echo "Unknown")
+
+# Detect if it's likely a flash drive vs SD card
+# Convert to integer for comparison by removing decimal part
+device_size_int=$(echo "$device_size_gb" | cut -d. -f1)
+
+# Check if device is removable (USB pendrive, SD card, etc.)
+# Also check if it's a USB device by model name even if not marked as removable
+is_usb_device=false
+if [[ "$device_model" =~ [Ff]lash|[Uu][Ss][Bb]|[Pp]en|[Dd]rive|[Dd]isk|[Ss]an[Dd]isk|[Kk]ingston|[Pp][Nn][Yy]|[Cc]orsair|[Cc]rucial|[Ss]amsung|[Tt]oshiba|[Ww]estern\ [Dd]igital|[Ww][Dd]|[Ss]eagate ]]; then
+    is_usb_device=true
+fi
+
+if [ "$is_removable" = "1" ] || [ "$is_removable" = "true" ] || [ "$is_usb_device" = true ]; then
+    if [ "$device_size_int" -gt 16 ]; then
+        device_type="flash_drive"
+        log "$LOG_INFO" "Device appears to be a USB flash drive (${device_size_gb} GB, removable: $is_removable, USB model: $is_usb_device)"
+    elif [ "$device_size_int" -gt 1 ]; then
+        device_type="sd_card"
+        log "$LOG_INFO" "Device appears to be an SD card (${device_size_gb} GB, removable: $is_removable, USB model: $is_usb_device)"
+    else
+        device_type="small_device"
+        log "$LOG_INFO" "Device appears to be a small removable storage device (${device_size_gb} GB)"
+    fi
+else
+    # Non-removable device - be more conservative
+    if [ "$device_size_int" -gt 32 ]; then
+        device_type="flash_drive"
+        log "$LOG_INFO" "Device appears to be a large storage device (${device_size_gb} GB, non-removable)"
+    elif [ "$device_size_int" -gt 16 ]; then
+        device_type="sd_card"
+        log "$LOG_INFO" "Device appears to be a medium storage device (${device_size_gb} GB, non-removable)"
+    else
+        device_type="small_device"
+        log "$LOG_INFO" "Device appears to be a small storage device (${device_size_gb} GB, non-removable)"
+    fi
+fi
+
+# Display device analysis
+echo ""
+echo -e "${CYAN}Device Analysis:${NC}"
+echo "  Type: $device_type"
+echo "  Size: ${device_size_gb} GB"
+echo "  Removable: $([ "$is_removable" = "1" ] && echo "Yes" || echo "No")"
+echo "  Model: $device_model"
+
+# Add recommendation based on device type
+if [ "$device_type" = "flash_drive" ]; then
+    echo "  Recommendation: Skip formatting (let OS image create partitions)"
+    echo "  Reason: Flash drives work better with OS-defined partition layout"
+elif [ "$device_type" = "sd_card" ]; then
+    echo "  Recommendation: Format"
+    echo "  Reason: SD cards benefit from fresh formatting before flashing"
+else
+    echo "  Recommendation: Format"
+    echo "  Reason: Small devices benefit from fresh formatting"
+fi
+echo ""
+
+# Detect if it's likely a flash drive vs SD card
+# Convert to integer for comparison by removing decimal part
+device_size_int=$(echo "$device_size_gb" | cut -d. -f1)
+
+# Check if device is removable (USB pendrive, SD card, etc.)
+# Also check if it's a USB device by model name even if not marked as removable
+is_usb_device=false
+if [[ "$device_model" =~ [Ff]lash|[Uu][Ss][Bb]|[Pp]en|[Dd]rive|[Dd]isk|[Ss]an[Dd]isk|[Kk]ingston|[Pp][Nn][Yy]|[Cc]orsair|[Cc]rucial|[Ss]amsung|[Tt]oshiba|[Ww]estern\ [Dd]igital|[Ww][Dd]|[Ss]eagate ]]; then
+    is_usb_device=true
+fi
+
+if [ "$is_removable" = "1" ] || [ "$is_removable" = "true" ] || [ "$is_usb_device" = true ]; then
+    if [ "$device_size_int" -gt 16 ]; then
+        device_type="flash_drive"
+        log "$LOG_INFO" "Device appears to be a USB flash drive (${device_size_gb} GB, removable: $is_removable, USB model: $is_usb_device)"
+    elif [ "$device_size_int" -gt 1 ]; then
+        device_type="sd_card"
+        log "$LOG_INFO" "Device appears to be an SD card (${device_size_gb} GB, removable: $is_removable, USB model: $is_usb_device)"
+    else
+        device_type="small_device"
+        log "$LOG_INFO" "Device appears to be a small removable storage device (${device_size_gb} GB)"
+    fi
+else
+    # Non-removable device - be more conservative
+    if [ "$device_size_int" -gt 32 ]; then
+        device_type="flash_drive"
+        log "$LOG_INFO" "Device appears to be a large storage device (${device_size_gb} GB, non-removable)"
+    elif [ "$device_size_int" -gt 16 ]; then
+        device_type="sd_card"
+        log "$LOG_INFO" "Device appears to be a medium storage device (${device_size_gb} GB, non-removable)"
+    else
+        device_type="small_device"
+        log "$LOG_INFO" "Device appears to be a small storage device (${device_size_gb} GB, non-removable)"
+    fi
+fi
+
 # Enhanced confirmation with device-specific warnings
 echo ""
 if [ "$device_type" = "flash_drive" ]; then
-    echo "${RED}*** FLASH DRIVE DETECTED ***${NC}"
+    echo -e "${RED}*** FLASH DRIVE DETECTED ***${NC}"
     echo "Device: $sd_card (${device_size_gb} GB)"
+    echo "Model: $device_model"
     echo "This appears to be a USB flash drive or large storage device."
     echo ""
-    echo "${YELLOW}WARNING: All data on this device will be completely erased!${NC}"
+    echo -e "${YELLOW}WARNING: All data on this device will be completely erased!${NC}"
     echo "This operation cannot be undone."
     echo ""
     echo "Are you absolutely sure you want to continue? (y/N):"
 elif [ "$device_type" = "sd_card" ]; then
-    echo "${BLUE}*** SD CARD DETECTED ***${NC}"
+    echo -e "${BLUE}*** SD CARD DETECTED ***${NC}"
     echo "Device: $sd_card (${device_size_gb} GB)"
+    echo "Model: $device_model"
     echo ""
-    echo "${YELLOW}WARNING: All data on this SD card will be erased. Continue? (y/N):${NC}"
+    echo -e "${YELLOW}WARNING: All data on this SD card will be erased. Continue? (y/N):${NC}"
 else
-    echo "${MAGENTA}*** STORAGE DEVICE DETECTED ***${NC}"
+    echo -e "${MAGENTA}*** STORAGE DEVICE DETECTED ***${NC}"
     echo "Device: $sd_card (${device_size_gb} GB)"
+    echo "Model: $device_model"
     echo ""
-    echo "${YELLOW}WARNING: All data on this device will be erased. Continue? (y/N):${NC}"
+    echo -e "${YELLOW}WARNING: All data on this device will be erased. Continue? (y/N):${NC}"
 fi
 
 read -r confirm
 confirm=${confirm:-"N"}
 if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-    log "Aborted."
+    log "$LOG_WARN" "Aborted by user."
     exit 1
 fi
 
 # Additional confirmation for large devices
-if [ "$device_size_gb" -gt 16 ]; then
+if [ "$device_size_int" -gt 16 ]; then
     echo ""
-    echo "${RED}*** FINAL WARNING ***${NC}"
+    echo -e "${RED}*** FINAL WARNING ***${NC}"
     echo "This is a large device (${device_size_gb} GB). Are you sure you want to erase it?"
     echo "Type 'YES' to confirm:"
     read -r final_confirm
@@ -703,35 +824,12 @@ if [ "$device_size_gb" -gt 16 ]; then
     fi
 fi
 
-# Smart formatting decision based on device type and size
-log "$LOG_INFO" "Analyzing device characteristics..."
-device_size_gb=$(echo "scale=1; $size / 1024 / 1024 / 1024" | bc -l 2>/dev/null || echo "0")
-device_type="unknown"
 
-# Detect if it's likely a flash drive vs SD card
-if [ "$device_size_gb" -gt 16 ]; then
-    device_type="flash_drive"
-    log "$LOG_INFO" "Device appears to be a flash drive (${device_size_gb} GB)"
-elif [ "$device_size_gb" -gt 1 ]; then
-    device_type="sd_card"
-    log "$LOG_INFO" "Device appears to be an SD card (${device_size_gb} GB)"
-else
-    device_type="small_device"
-    log "$LOG_INFO" "Device appears to be a small storage device (${device_size_gb} GB)"
-fi
 
-# Check if device is removable
-is_removable=$(lsblk -d -o RM "$sd_card" | tail -n 1)
-if [ "$is_removable" = "1" ]; then
-    log "$LOG_INFO" "Device is removable (likely USB flash drive or external SD card reader)"
-else
-    log "$LOG_WARN" "Device is not removable (likely internal storage - BE CAREFUL!)"
-fi
-
-# Smart formatting decision
+# Smart formatting decision based on device type
 format_recommended="N"
 format_reason=""
-if [ "$device_type" = "flash_drive" ] && [ "$is_removable" = "1" ]; then
+if [ "$device_type" = "flash_drive" ]; then
     format_recommended="N"
     format_reason="Flash drives work better without pre-formatting for Raspberry Pi OS images"
 elif [ "$device_type" = "sd_card" ] || [ "$device_type" = "small_device" ]; then
@@ -744,7 +842,7 @@ fi
 
 # Show formatting recommendation
 echo ""
-echo "Device Analysis:"
+echo -e "${CYAN}Formatting Recommendation:${NC}"
 echo "  Type: $device_type"
 echo "  Size: ${device_size_gb} GB"
 echo "  Removable: $([ "$is_removable" = "1" ] && echo "Yes" || echo "No")"
@@ -753,6 +851,12 @@ echo "  Reason: $format_reason"
 echo ""
 
 # Ask user about formatting with smart defaults
+if [ "$device_type" = "flash_drive" ]; then
+    echo -e "${YELLOW}Note: This is a flash drive. It's recommended to skip formatting to let the OS image create its own partition layout.${NC}"
+elif [ "$device_type" = "sd_card" ]; then
+    echo -e "${BLUE}Note: This is an SD card. Fresh formatting is recommended for best performance.${NC}"
+fi
+echo ""
 echo "Do you want to format $sd_card before flashing? (y/N) (default: ${format_recommended}):"
 read -r format_confirm
 format_confirm=${format_confirm:-$format_recommended}
