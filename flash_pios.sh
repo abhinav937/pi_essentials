@@ -17,6 +17,21 @@ for cmd in wget dd xz lsblk sha256sum partprobe jq openssl pv; do
     fi
 done
 
+# Configuration file path
+config_dir="$HOME/.config/pi_essentials"
+config_file="$config_dir/flash_pios.json"
+mkdir -p "$config_dir"
+
+# Load defaults from config (if present)
+default_username=$(jq -r '.username // empty' "$config_file" 2>/dev/null || true)
+default_arch=$(jq -r '.arch // empty' "$config_file" 2>/dev/null || true)
+default_static_ip=$(jq -r '.static_ip // empty' "$config_file" 2>/dev/null || true)
+default_gateway_ip=$(jq -r '.gateway_ip // empty' "$config_file" 2>/dev/null || true)
+default_subnet_mask=$(jq -r '.subnet_mask // empty' "$config_file" 2>/dev/null || true)
+default_dns_server=$(jq -r '.dns_server // empty' "$config_file" 2>/dev/null || true)
+default_local_image=$(jq -r '.local_image // empty' "$config_file" 2>/dev/null || true)
+downloaded_xz=""
+
 # Get the boot device (parent device, not partition)
 boot_device=$(lsblk -o NAME,MOUNTPOINTS | grep -E '[[:space:]]/(boot/firmware|/)' | head -n 1 | awk '{print $1}' | sed 's/[├─│└].*//')
 boot_device="/dev/$boot_device"
@@ -77,28 +92,30 @@ if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
 fi
 
 # Prompt for username and architecture
-echo "Enter username for the Raspberry Pi (default: pi):"
+echo "Enter username for the Raspberry Pi (default: ${default_username:-pi}):"
 read -r username
-username=${username:-pi}
+username=${username:-${default_username:-pi}}
 echo "Enter password for user $username (leave empty for key-only authentication):"
 read -r -s password
 echo
-echo "Choose architecture: 32 or 64 (default: 64):"
+echo "Choose architecture: 32 or 64 (default: ${default_arch:-64}):"
 read -r arch
-arch=${arch:-64}
+arch=${arch:-${default_arch:-64}}
 
 # Prompt for static IP address
-echo "Enter the static IP address for the Raspberry Pi (e.g., 192.168.0.100) or press Enter to skip:"
+echo "Enter the static IP address for the Raspberry Pi (e.g., 192.168.0.100) or press Enter to skip (default: ${default_static_ip:-none}):"
 read -r static_ip
+static_ip=${static_ip:-$default_static_ip}
 if [ -n "$static_ip" ]; then
-    echo "Enter your network's gateway/router IP (e.g., 192.168.0.1):"
+    echo "Enter your network's gateway/router IP (e.g., 192.168.0.1) (default: ${default_gateway_ip:-}):"
     read -r gateway_ip
+    gateway_ip=${gateway_ip:-$default_gateway_ip}
     if [ -z "$gateway_ip" ]; then
         echo "Error: Gateway IP cannot be empty if static IP is set."
         exit 1
     fi
-    subnet_mask="24"
-    dns_server="8.8.8.8"
+    subnet_mask="${default_subnet_mask:-24}"
+    dns_server="${default_dns_server:-8.8.8.8}"
     echo "Using subnet mask /$subnet_mask and DNS $dns_server. Edit /etc/dhcpcd.conf manually if different values are needed."
 fi
 
@@ -114,8 +131,9 @@ if [ -z "$pubkey" ]; then
 fi
 
 # Prompt for local image file
-echo "Enter the path to a local Raspberry Pi OS Lite image (.img or .img.xz) or press Enter to download the latest:"
+echo "Enter the path to a local Raspberry Pi OS Lite image (.img or .img.xz) or press Enter to download the latest${default_local_image:+ [default: $default_local_image]}:"
 read -r local_image
+local_image=${local_image:-$default_local_image}
 image_file="raspios-lite-latest.img"
 if [ -n "$local_image" ]; then
     # Validate local image
@@ -157,14 +175,22 @@ else
         echo "Error: Download failed."
         exit 1
     fi
+    # Rename the downloaded file to match the name in the checksum file (if provided)
+    expected_xz=$(awk '{print $2}' raspios-lite-latest.sha256 | tr -d '\r')
+    downloaded_xz="raspios-lite-latest.img.xz"
+    if [ -n "$expected_xz" ]; then
+        mv -f "$downloaded_xz" "$expected_xz"
+        downloaded_xz="$expected_xz"
+    fi
     echo "Verifying image integrity..."
     if ! sha256sum -c raspios-lite-latest.sha256; then
         echo "Error: Image verification failed."
         exit 1
     fi
     # Decompress the image
-    echo "Decompressing raspios-lite-latest.img.xz..."
-    xz -dk "raspios-lite-latest.img.xz"
+    echo "Decompressing $downloaded_xz..."
+    xz -dk "$downloaded_xz"
+    image_file="${downloaded_xz%.xz}"
 fi
 
 # Unmount all partitions of the SD card
@@ -201,7 +227,7 @@ fi
 if [ ! -b "${sd_card}2" ]; then
     echo "Error: Partition ${sd_card}2 not found. Image may not have flashed correctly."
     exit 1
-}
+fi
 if ! sudo mount "${sd_card}2" "$root_mnt"; then
     echo "Error: Failed to mount ${sd_card}2"
     exit 1
@@ -279,7 +305,13 @@ sudo eject "$sd_card" || true
 # Clean up
 echo "Cleaning up..."
 rm -f "$image_file"
-[ -z "$local_image" ] && rm -f "raspios-lite-latest.img.xz" "raspios-lite-latest.sha256"
+if [ -z "$local_image" ]; then
+    # Clean up downloaded artifacts regardless of renamed filename
+    rm -f "raspios-lite-latest.img.xz" "raspios-lite-latest.sha256"
+    if [ -n "$downloaded_xz" ]; then
+        rm -f "$downloaded_xz"
+    fi
+fi
 
 echo "SD card has been formatted, flashed, and configured successfully!"
 echo "You can now remove the SD card and insert it into your Raspberry Pi."
@@ -288,3 +320,14 @@ if [ -n "$static_ip" ]; then
 else
     echo "Try SSH with: ssh $username@<Raspberry Pi IP>"
 fi
+
+# Persist configuration for next run
+persist_json=$(jq -n \
+    --arg username "$username" \
+    --arg arch "$arch" \
+    --arg static_ip "${static_ip}" \
+    --arg gateway_ip "${gateway_ip}" \
+    --arg subnet_mask "${subnet_mask:-24}" \
+    --arg dns_server "${dns_server:-8.8.8.8}" \
+    --arg local_image "${local_image}" '{username:$username, arch:$arch, static_ip:$static_ip, gateway_ip:$gateway_ip, subnet_mask:$subnet_mask, dns_server:$dns_server, local_image:$local_image}')
+echo "$persist_json" > "$config_file"
