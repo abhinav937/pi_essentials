@@ -136,17 +136,10 @@ else
     sd_card="/dev/${devices[$choice]%% *}"
 fi
 
-# Warn if device size is unusually large (>64GB)
+# Show device size
 size=$(lsblk -b -o SIZE "$sd_card" | tail -n 1)
-if [ "$size" -gt 68719476736 ]; then
-    size_gb=$(echo "scale=1; $size / 1024 / 1024 / 1024" | bc -l 2>/dev/null || echo "unknown")
-    echo "WARNING: $sd_card is larger than 64GB (${size_gb} GB). Are you sure this is the correct SD card? (y/N)"
-    read -r confirm
-    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-        echo "Aborted."
-        exit 1
-    fi
-fi
+size_gb=$(echo "scale=1; $size / 1024 / 1024 / 1024" | bc -l 2>/dev/null || echo "unknown")
+echo "Selected device: $sd_card (${size_gb} GB)"
 
 # Confirm SD card erasing
 echo "WARNING: All data on $sd_card will be erased. Continue? (y/N) (default: ${default_confirm_erase:-N}):"
