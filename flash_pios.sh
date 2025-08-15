@@ -10,7 +10,7 @@ command_exists() {
 }
 
 # Check for required tools
-for cmd in wget dd xz lsblk sha256sum partprobe jq openssl pv numfmt; do
+for cmd in wget dd xz lsblk sha256sum partprobe jq openssl pv numfmt bc; do
     if ! command_exists "$cmd"; then
         echo "Error: $cmd is not installed. Please install it (e.g., 'sudo apt install $cmd')."
         exit 1
@@ -139,7 +139,8 @@ fi
 # Warn if device size is unusually large (>64GB)
 size=$(lsblk -b -o SIZE "$sd_card" | tail -n 1)
 if [ "$size" -gt 68719476736 ]; then
-    echo "WARNING: $sd_card is larger than 64GB ($size bytes). Are you sure this is the correct SD card? (y/N)"
+    size_gb=$(echo "scale=1; $size / 1024 / 1024 / 1024" | bc -l 2>/dev/null || echo "unknown")
+    echo "WARNING: $sd_card is larger than 64GB (${size_gb} GB). Are you sure this is the correct SD card? (y/N)"
     read -r confirm
     if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
         echo "Aborted."
@@ -341,9 +342,12 @@ fi
 echo "Image size: $(numfmt --to=iec-i --suffix=B $image_size)"
 echo "Starting write operation..."
 
+# Use pv with better progress display
 if command_exists pv; then
-    sudo pv -s "$image_size" "$image_file" | sudo dd bs=4M of="$sd_card" conv=fsync
+    echo "Using pv for progress display..."
+    sudo pv -s "$image_size" -p -t -e -r "$image_file" | sudo dd bs=4M of="$sd_card" conv=fsync
 else
+    echo "pv not available, using dd with progress..."
     sudo dd bs=4M if="$image_file" of="$sd_card" conv=fsync status=progress
 fi
 
@@ -401,8 +405,12 @@ sudo touch "$boot_mnt/ssh"
 
 # Check if username already exists in /etc/passwd
 if grep -q "^$username:" "$root_mnt/etc/passwd"; then
-    echo "Error: User $username already exists in the image."
-    exit 1
+    echo "User $username already exists in the image. Updating existing user configuration..."
+    # Remove existing user entries
+    sudo sed -i "/^$username:/d" "$root_mnt/etc/passwd"
+    sudo sed -i "/^$username:/d" "$root_mnt/etc/group"
+    sudo sed -i "/^$username:/d" "$root_mnt/etc/shadow"
+    echo "Removed existing user $username entries."
 fi
 
 # Create user configuration
