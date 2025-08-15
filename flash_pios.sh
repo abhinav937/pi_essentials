@@ -17,8 +17,14 @@ for cmd in wget dd xz lsblk sha256sum partprobe jq openssl pv; do
     fi
 done
 
-# Configuration file path
-config_dir="$HOME/.config/pi_essentials"
+# Configuration owner (prefer invoking non-root user when run with sudo)
+config_owner="${SUDO_USER:-$USER}"
+config_owner_home=$(getent passwd "$config_owner" | cut -d: -f6 2>/dev/null)
+config_owner_home=${config_owner_home:-$HOME}
+
+# Configuration file path: store next to this script in the project folder
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+config_dir="$script_dir"
 config_file="$config_dir/flash_pios.json"
 mkdir -p "$config_dir"
 
@@ -31,6 +37,22 @@ default_subnet_mask=$(jq -r '.subnet_mask // empty' "$config_file" 2>/dev/null |
 default_dns_server=$(jq -r '.dns_server // empty' "$config_file" 2>/dev/null || true)
 default_local_image=$(jq -r '.local_image // empty' "$config_file" 2>/dev/null || true)
 downloaded_xz=""
+
+# Helper to persist configuration to JSON
+write_config() {
+    persist_json=$(jq -n \
+        --arg username "$username" \
+        --arg arch "$arch" \
+        --arg static_ip "${static_ip}" \
+        --arg gateway_ip "${gateway_ip}" \
+        --arg subnet_mask "${subnet_mask:-24}" \
+        --arg dns_server "${dns_server:-8.8.8.8}" \
+        --arg local_image "${local_image}" '{username:$username, arch:$arch, static_ip:$static_ip, gateway_ip:$gateway_ip, subnet_mask:$subnet_mask, dns_server:$dns_server, local_image:$local_image}')
+    echo "$persist_json" > "$config_file"
+    if [ -n "$config_owner" ] && [ "$config_owner" != "root" ]; then
+        chown "$config_owner":"$config_owner" "$config_file" 2>/dev/null || true
+    fi
+}
 
 # Get the boot device (parent device, not partition)
 boot_device=$(lsblk -o NAME,MOUNTPOINTS | grep -E '[[:space:]]/(boot/firmware|/)' | head -n 1 | awk '{print $1}' | sed 's/[├─│└].*//')
@@ -101,6 +123,7 @@ echo
 echo "Choose architecture: 32 or 64 (default: ${default_arch:-64}):"
 read -r arch
 arch=${arch:-${default_arch:-64}}
+write_config
 
 # Prompt for static IP address
 echo "Enter the static IP address for the Raspberry Pi (e.g., 192.168.0.100) or press Enter to skip (default: ${default_static_ip:-none}):"
@@ -118,13 +141,25 @@ if [ -n "$static_ip" ]; then
     dns_server="${default_dns_server:-8.8.8.8}"
     echo "Using subnet mask /$subnet_mask and DNS $dns_server. Edit /etc/dhcpcd.conf manually if different values are needed."
 fi
+write_config
+
+# Determine which user's SSH key to use (prefer the invoking non-root user if run with sudo)
+ssh_user="${SUDO_USER:-$USER}"
+ssh_user_home=$(getent passwd "$ssh_user" | cut -d: -f6 2>/dev/null)
+ssh_user_home=${ssh_user_home:-$HOME}
 
 # Check for or generate SSH key pair
-if [ ! -f ~/.ssh/id_ed25519 ]; then
-    echo "No SSH key found. Generating a new ED25519 key pair..."
-    ssh-keygen -t ed25519 -C "$username@raspberrypi" -N "" -f ~/.ssh/id_ed25519
+if [ ! -f "$ssh_user_home/.ssh/id_ed25519" ]; then
+    echo "No SSH key found for $ssh_user. Generating a new ED25519 key pair..."
+    if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+        sudo -u "$SUDO_USER" -H mkdir -p "$ssh_user_home/.ssh"
+        sudo -u "$SUDO_USER" -H ssh-keygen -t ed25519 -C "$username@raspberrypi" -N "" -f "$ssh_user_home/.ssh/id_ed25519"
+    else
+        mkdir -p "$ssh_user_home/.ssh"
+        ssh-keygen -t ed25519 -C "$username@raspberrypi" -N "" -f "$ssh_user_home/.ssh/id_ed25519"
+    fi
 fi
-pubkey=$(cat ~/.ssh/id_ed25519.pub)
+pubkey=$(cat "$ssh_user_home/.ssh/id_ed25519.pub")
 if [ -z "$pubkey" ]; then
     echo "Error: Failed to read public key."
     exit 1
@@ -135,6 +170,7 @@ echo "Enter the path to a local Raspberry Pi OS Lite image (.img or .img.xz) or 
 read -r local_image
 local_image=${local_image:-$default_local_image}
 image_file="raspios-lite-latest.img"
+write_config
 if [ -n "$local_image" ]; then
     # Validate local image
     if [ ! -f "$local_image" ]; then
@@ -199,8 +235,7 @@ sudo umount "${sd_card}"* 2>/dev/null || true
 
 # Write the image to the SD card with pv for progress bar
 echo "Writing $image_file to $sd_card..."
-image_size=$(stat -f %z "$image_file" 2>/dev/null || stat -c %s "$image_file") # macOS or Linux
-sudo pv -s "$image_size" "$image_file" | sudo dd bs=4M of="$sd_card" conv=fsync
+sudo pv "$image_file" | sudo dd bs=4M of="$sd_card" conv=fsync
 
 # Sync to ensure all data is written
 sync
@@ -211,6 +246,7 @@ if ! sudo partprobe "$sd_card"; then
     echo "Warning: Failed to refresh partition table. Waiting 2 seconds..."
     sleep 2
 fi
+sudo udevadm settle || sleep 2
 
 # Mount the boot and rootfs partitions
 echo "Mounting SD card partitions..."
@@ -218,6 +254,11 @@ boot_mnt=$(mktemp -d)
 root_mnt=$(mktemp -d)
 if [ ! -b "${sd_card}1" ]; then
     echo "Error: Partition ${sd_card}1 not found. Image may not have flashed correctly."
+    echo "Waiting for partitions to appear..."
+    sleep 3
+fi
+if [ ! -b "${sd_card}1" ]; then
+    echo "Error: Partition ${sd_card}1 not found after waiting. Image may not have flashed correctly."
     exit 1
 fi
 if ! sudo mount "${sd_card}1" "$boot_mnt"; then
@@ -226,6 +267,11 @@ if ! sudo mount "${sd_card}1" "$boot_mnt"; then
 fi
 if [ ! -b "${sd_card}2" ]; then
     echo "Error: Partition ${sd_card}2 not found. Image may not have flashed correctly."
+    echo "Waiting for partitions to appear..."
+    sleep 3
+fi
+if [ ! -b "${sd_card}2" ]; then
+    echo "Error: Partition ${sd_card}2 not found after waiting. Image may not have flashed correctly."
     exit 1
 fi
 if ! sudo mount "${sd_card}2" "$root_mnt"; then
@@ -322,12 +368,4 @@ else
 fi
 
 # Persist configuration for next run
-persist_json=$(jq -n \
-    --arg username "$username" \
-    --arg arch "$arch" \
-    --arg static_ip "${static_ip}" \
-    --arg gateway_ip "${gateway_ip}" \
-    --arg subnet_mask "${subnet_mask:-24}" \
-    --arg dns_server "${dns_server:-8.8.8.8}" \
-    --arg local_image "${local_image}" '{username:$username, arch:$arch, static_ip:$static_ip, gateway_ip:$gateway_ip, subnet_mask:$subnet_mask, dns_server:$dns_server, local_image:$local_image}')
-echo "$persist_json" > "$config_file"
+write_config
