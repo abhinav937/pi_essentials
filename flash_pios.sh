@@ -36,6 +36,10 @@ default_gateway_ip=$(jq -r '.gateway_ip // empty' "$config_file" 2>/dev/null || 
 default_subnet_mask=$(jq -r '.subnet_mask // empty' "$config_file" 2>/dev/null || true)
 default_dns_server=$(jq -r '.dns_server // empty' "$config_file" 2>/dev/null || true)
 default_local_image=$(jq -r '.local_image // empty' "$config_file" 2>/dev/null || true)
+default_password=$(jq -r '.password // empty' "$config_file" 2>/dev/null || true)
+default_confirm_erase=$(jq -r '.confirm_erase // empty' "$config_file" 2>/dev/null || true)
+default_confirm_format=$(jq -r '.confirm_format // empty' "$config_file" 2>/dev/null || true)
+default_confirm_flash=$(jq -r '.confirm_flash // empty' "$config_file" 2>/dev/null || true)
 downloaded_xz=""
 
 # Helper to persist configuration to JSON
@@ -47,7 +51,12 @@ write_config() {
         --arg gateway_ip "${gateway_ip}" \
         --arg subnet_mask "${subnet_mask:-24}" \
         --arg dns_server "${dns_server:-8.8.8.8}" \
-        --arg local_image "${local_image}" '{username:$username, arch:$arch, static_ip:$static_ip, gateway_ip:$gateway_ip, subnet_mask:$subnet_mask, dns_server:$dns_server, local_image:$local_image}')
+        --arg local_image "${local_image}" \
+        --arg password "${password}" \
+        --arg confirm_erase "${confirm:-N}" \
+        --arg confirm_format "${format_confirm:-N}" \
+        --arg confirm_flash "${flash_confirm:-N}" \
+        '{username:$username, arch:$arch, static_ip:$static_ip, gateway_ip:$gateway_ip, subnet_mask:$subnet_mask, dns_server:$dns_server, local_image:$local_image, password:$password, confirm_erase:$confirm_erase, confirm_format:$confirm_format, confirm_flash:$confirm_flash}')
     echo "$persist_json" > "$config_file"
     if [ -n "$config_owner" ] && [ "$config_owner" != "root" ]; then
         chown "$config_owner":"$config_owner" "$config_file" 2>/dev/null || true
@@ -105,10 +114,31 @@ if [ "$size" -gt 68719476736 ]; then
     fi
 fi
 
-# Confirm SD card formatting
-echo "WARNING: All data on $sd_card will be erased. Continue? (y/N)"
+# Confirm SD card erasing
+echo "WARNING: All data on $sd_card will be erased. Continue? (y/N) (default: ${default_confirm_erase:-N}):"
 read -r confirm
+confirm=${confirm:-${default_confirm_erase:-N}}
 if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+    echo "Aborted."
+    exit 1
+fi
+
+# Confirm FAT32 formatting
+echo "Do you want to format $sd_card to FAT32 before flashing? (y/N) (default: ${default_confirm_format:-N}):"
+read -r format_confirm
+format_confirm=${format_confirm:-${default_confirm_format:-N}}
+if [ "$format_confirm" = "y" ] || [ "$format_confirm" = "Y" ]; then
+    echo "Formatting $sd_card to FAT32..."
+    sudo mkfs.vfat -F 32 "$sd_card" || {
+        echo "Warning: FAT32 formatting failed. Continuing with existing format..."
+    }
+fi
+
+# Final confirmation before flashing
+echo "Ready to flash Raspberry Pi OS to $sd_card. Continue? (y/N) (default: ${default_confirm_flash:-N}):"
+read -r flash_confirm
+flash_confirm=${flash_confirm:-${default_confirm_flash:-N}}
+if [ "$flash_confirm" != "y" ] && [ "$flash_confirm" != "Y" ]; then
     echo "Aborted."
     exit 1
 fi
@@ -117,8 +147,9 @@ fi
 echo "Enter username for the Raspberry Pi (default: ${default_username:-pi}):"
 read -r username
 username=${username:-${default_username:-pi}}
-echo "Enter password for user $username (leave empty for key-only authentication):"
+echo "Enter password for user $username (leave empty for key-only authentication) (default: ${default_password:-}):"
 read -r -s password
+password=${password:-$default_password}
 echo
 echo "Choose architecture: 32 or 64 (default: ${default_arch:-64}):"
 read -r arch
@@ -184,15 +215,13 @@ if [ -n "$local_image" ]; then
     echo "Using local image: $local_image"
     if [[ "$local_image" == *.img.xz ]]; then
         echo "Decompressing local image $local_image..."
-        if ! xz -dc "$local_image" > "$image_file"; then
+        image_file="${local_image%.xz}"
+        if ! xz -dk "$local_image"; then
             echo "Error: Failed to decompress $local_image."
             exit 1
         fi
     else
-        if ! cp "$local_image" "$image_file"; then
-            echo "Error: Failed to copy $local_image."
-            exit 1
-        fi
+        image_file="$local_image"
     fi
 else
     # Set the static URL for the latest Raspberry Pi OS Lite
@@ -235,7 +264,11 @@ sudo umount "${sd_card}"* 2>/dev/null || true
 
 # Write the image to the SD card with pv for progress bar
 echo "Writing $image_file to $sd_card..."
-sudo pv "$image_file" | sudo dd bs=4M of="$sd_card" conv=fsync
+if command_exists pv; then
+    sudo pv "$image_file" | sudo dd bs=4M of="$sd_card" conv=fsync
+else
+    sudo dd bs=4M if="$image_file" of="$sd_card" conv=fsync status=progress
+fi
 
 # Sync to ensure all data is written
 sync
