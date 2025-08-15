@@ -129,9 +129,31 @@ read -r format_confirm
 format_confirm=${format_confirm:-${default_confirm_format:-N}}
 if [ "$format_confirm" = "y" ] || [ "$format_confirm" = "Y" ]; then
     echo "Formatting $sd_card to FAT32..."
-    sudo mkfs.vfat -F 32 "$sd_card" || {
-        echo "Warning: FAT32 formatting failed. Continuing with existing format..."
-    }
+    
+    # Unmount any existing partitions
+    sudo umount "${sd_card}"* 2>/dev/null || true
+    
+    # Clear partition table and create new one
+    echo "Clearing partition table..."
+    sudo dd if=/dev/zero of="$sd_card" bs=1M count=1 conv=notrunc
+    
+    # Create new partition table
+    echo "Creating new partition table..."
+    echo -e "o\nn\np\n1\n\n\nw" | sudo fdisk "$sd_card"
+    
+    # Wait for partition to be recognized
+    sudo partprobe "$sd_card"
+    sleep 2
+    
+    # Format the first partition as FAT32
+    if [ -b "${sd_card}1" ]; then
+        echo "Formatting ${sd_card}1 as FAT32..."
+        sudo mkfs.vfat -F 32 "${sd_card}1" || {
+            echo "Warning: FAT32 formatting failed. Continuing with existing format..."
+        }
+    else
+        echo "Warning: Partition ${sd_card}1 not found. Continuing with existing format..."
+    fi
 fi
 
 # Final confirmation before flashing
