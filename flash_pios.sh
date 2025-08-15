@@ -294,8 +294,8 @@ if [ -n "$local_image" ]; then
                 echo "Starting decompression with progress display..."
                 echo "Progress: ["
                 
-                # Use pv with explicit progress display
-                if ! pv -s "$compressed_size" -F "%N %b %t %r %e %p" "$local_image" 2>&1 | xz -dc > "$image_file"; then
+                # Use pv with explicit progress display and force unbuffered output
+                if ! stdbuf -oL pv -s "$compressed_size" -p -t -e -r -f -B 65536 "$local_image" 2>/dev/tty | xz -dc > "$image_file"; then
                     echo "Error: Failed to decompress $local_image."
                     cleanup_and_exit 1 "failed"
                 fi
@@ -381,12 +381,12 @@ echo "Starting write operation..."
 if command_exists pv; then
     echo "Using pv for progress display..."
     echo "pv version: $(pv --version | head -1)"
-    echo "pv command: pv -s $image_size -p -t -e -r $image_file"
+    echo "pv command: pv -s $image_size -p -t -e -r -f -B 65536 $image_file"
     echo "Starting pv transfer..."
     echo "Progress: ["
-    
-    # Force progress output to terminal and do the actual transfer
-    if ! sudo pv -s "$image_size" -p -t -e -r "$image_file" 2>&1 | sudo dd bs=4M of="$sd_card" conv=fsync; then
+
+    # Force progress output and reduce buffering
+    if ! stdbuf -oL pv -s "$image_size" -p -t -e -r -f -B 65536 "$image_file" 2>/dev/tty | sudo dd bs=4M of="$sd_card" conv=fsync; then
         echo "Error: Failed to write image to SD card!"
         cleanup_and_exit 1 "failed"
     fi
