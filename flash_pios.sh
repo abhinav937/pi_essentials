@@ -290,13 +290,8 @@ if [ -n "$local_image" ]; then
                 echo "Using pv for decompression progress..."
                 echo "pv decompression command: pv -s $compressed_size $local_image | xz -dc > $image_file"
                 
-                # Test pv output first
-                echo "Testing pv decompression output:"
-                pv -s "$compressed_size" "$local_image" | head -c 1M > /dev/null
-                echo "pv decompression test completed"
-                
-                # Now do the actual decompression
-                if ! pv -s "$compressed_size" "$local_image" | xz -dc > "$image_file"; then
+                # Now do the actual decompression with progress to terminal
+                if ! pv -s "$compressed_size" "$local_image" 2>&1 | xz -dc > "$image_file"; then
                     echo "Error: Failed to decompress $local_image."
                     cleanup_and_exit 1 "failed"
                 fi
@@ -384,13 +379,8 @@ if command_exists pv; then
     echo "pv command: pv -s $image_size -p -t -e -r $image_file"
     echo "Starting pv transfer..."
     
-    # Test pv output first
-    echo "Testing pv output:"
-    pv -s "$image_size" -p -t -e -r "$image_file" | head -c 1M > /dev/null
-    echo "pv test completed"
-    
-    # Now do the actual transfer
-    sudo pv -s "$image_size" -p -t -e -r "$image_file" | sudo dd bs=4M of="$sd_card" conv=fsync
+    # Force progress output to terminal and do the actual transfer
+    sudo pv -s "$image_size" -p -t -e -r "$image_file" 2>&1 | sudo dd bs=4M of="$sd_card" conv=fsync
 else
     echo "pv not available, using dd with progress..."
     sudo dd bs=4M if="$image_file" of="$sd_card" conv=fsync status=progress
