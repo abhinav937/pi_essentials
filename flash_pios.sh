@@ -767,7 +767,7 @@ if [ "$format_confirm" = "y" ] || [ "$format_confirm" = "Y" ]; then
         # For flash drives, just clear the partition table without creating new partitions
         log "$LOG_INFO" "Clearing partition table for flash drive (no new partitions will be created)..."
         sudo dd if=/dev/zero of="$sd_card" bs=1M count=1 conv=notrunc
-        log "$LOG_SUCCESS" "Partition table cleared. The image will create its own partition structure."
+        log "$LOG_INFO" "Partition table cleared. The image will create its own partition structure."
     else
         # For SD cards, create a new partition table and format
         log "$LOG_INFO" "Creating new partition table and formatting for SD card..."
@@ -787,7 +787,7 @@ if [ "$format_confirm" = "y" ] || [ "$format_confirm" = "Y" ]; then
             sudo mkfs.vfat -F 32 "${sd_card}1" 2>&1 | tee /tmp/mkfs_output.log
             
             if [ ${PIPESTATUS[0]} -eq 0 ]; then
-                log "$LOG_SUCCESS" "FAT32 formatting completed successfully."
+                log "$LOG_INFO" "FAT32 formatting completed successfully."
             else
                 log "$LOG_WARN" "FAT32 formatting had issues. Check /tmp/mkfs_output.log for details."
                 log "$LOG_WARN" "Continuing with existing format..."
@@ -812,9 +812,11 @@ if [ "$flash_confirm" != "y" ] && [ "$flash_confirm" != "Y" ]; then
 fi
 
 # Prompt for username and architecture
+log "$LOG_INFO" "Prompting for user configuration..."
 echo "Enter username for the Raspberry Pi (default: ${default_username:-pi}):"
 read -r username
 username=${username:-${default_username:-pi}}
+log "$LOG_INFO" "Username set to: $username"
 
 # Validate username
 if ! validate_username "$username"; then
@@ -825,18 +827,27 @@ fi
 echo "Enter password for user $username (leave empty for key-only authentication) (default: ${default_password:-}):"
 read -r -s password
 password=${password:-$default_password}
+if [ -n "$password" ]; then
+    log "$LOG_INFO" "Password set for user $username"
+else
+    log "$LOG_INFO" "No password set - key-only authentication will be used"
+fi
 echo
 echo "Choose architecture: 32 or 64 (default: ${default_arch:-64}):"
 read -r arch
 arch=${arch:-${default_arch:-64}}
+log "$LOG_INFO" "Architecture set to: $arch-bit"
 write_config
+log "$LOG_INFO" "User configuration saved"
 
 # Prompt for static IP address
+log "$LOG_INFO" "Prompting for network configuration..."
 echo "Enter the static IP address for the Raspberry Pi (e.g., 192.168.0.100) or press Enter to skip (default: ${default_static_ip:-none}):"
 read -r static_ip
 static_ip=${static_ip:-$default_static_ip}
 
 if [ -n "$static_ip" ]; then
+    log "$LOG_INFO" "Static IP requested: $static_ip"
     # Validate static IP
     if ! validate_ip "$static_ip"; then
         log "$LOG_ERROR" "Invalid IP address format: $static_ip"
@@ -860,9 +871,12 @@ if [ -n "$static_ip" ]; then
     
     subnet_mask="${default_subnet_mask:-24}"
     dns_server="${default_dns_server:-8.8.8.8}"
-    log "$LOG_INFO" "Using subnet mask /$subnet_mask and DNS $dns_server. Edit /etc/dhcpcd.conf manually if different values are needed."
+    log "$LOG_INFO" "Network configuration: IP=$static_ip, Gateway=$gateway_ip, Subnet=/$subnet_mask, DNS=$dns_server"
+else
+    log "$LOG_INFO" "No static IP requested - will use DHCP"
 fi
 write_config
+log "$LOG_INFO" "Network configuration saved"
 
 # Determine which user's SSH key to use (prefer the invoking non-root user if run with sudo)
 ssh_user="${SUDO_USER:-$USER}"
@@ -870,6 +884,7 @@ ssh_user_home=$(getent passwd "$ssh_user" | cut -d: -f6 2>/dev/null)
 ssh_user_home=${ssh_user_home:-$HOME}
 
 # Check for or generate SSH key pair
+log "$LOG_INFO" "Setting up SSH authentication..."
 if [ ! -f "$ssh_user_home/.ssh/id_ed25519" ]; then
     log "$LOG_INFO" "No SSH key found for $ssh_user. Generating a new ED25519 key pair..."
     if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
@@ -879,19 +894,32 @@ if [ ! -f "$ssh_user_home/.ssh/id_ed25519" ]; then
         mkdir -p "$ssh_user_home/.ssh"
         ssh-keygen -t ed25519 -C "$username@raspberrypi" -N "" -f "$ssh_user_home/.ssh/id_ed25519"
     fi
+    log "$LOG_INFO" "SSH key pair generated successfully"
+else
+    log "$LOG_INFO" "Using existing SSH key for $ssh_user"
 fi
 pubkey=$(cat "$ssh_user_home/.ssh/id_ed25519.pub")
 if [ -z "$pubkey" ]; then
     log "$LOG_ERROR" "Failed to read public key."
     exit 1
 fi
+log "$LOG_INFO" "SSH public key loaded successfully"
 
 # Prompt for local image file
+log "$LOG_INFO" "Prompting for image selection..."
 echo "Enter the path to a local Raspberry Pi OS Lite image (.img or .img.xz) or press Enter to download the latest${default_local_image:+ [default: $default_local_image]}:"
 read -r local_image
 local_image=${local_image:-$default_local_image}
 image_file="raspios-lite-latest.img"
+
+if [ -n "$local_image" ]; then
+    log "$LOG_INFO" "Local image selected: $local_image"
+else
+    log "$LOG_INFO" "Will download latest Raspberry Pi OS Lite image"
+fi
+
 write_config
+log "$LOG_INFO" "Image configuration saved"
 
 # Download and verify image
 if ! download_image "$arch" "$local_image"; then
@@ -925,19 +953,22 @@ boot_part=$(echo "$partition_info" | cut -d: -f1)
 root_part=$(echo "$partition_info" | cut -d: -f2)
 
 # Mount the boot and rootfs partitions
-log "Mounting SD card partitions..."
+log "$LOG_INFO" "Mounting SD card partitions..."
 boot_mnt=$(mktemp -d)
 root_mnt=$(mktemp -d)
+log "$LOG_INFO" "Created mount points: boot=$boot_mnt, root=$root_mnt"
 
 if ! sudo mount "$boot_part" "$boot_mnt"; then
-    log "Error: Failed to mount $boot_part"
+    log "$LOG_ERROR" "Failed to mount $boot_part"
     cleanup_and_exit 1 "failed"
 fi
+log "$LOG_INFO" "Boot partition mounted successfully"
 
 if ! sudo mount "$root_part" "$root_mnt"; then
-    log "Error: Failed to mount $root_part"
+    log "$LOG_ERROR" "Failed to mount $root_part"
     cleanup_and_exit 1 "failed"
 fi
+log "$LOG_INFO" "Root partition mounted successfully"
 
 # Configure user
 configure_user "$username" "$password" "$pubkey" "$root_mnt"
@@ -951,22 +982,23 @@ if [ -n "$static_ip" ]; then
 fi
 
 # Unmount partitions
-log "Unmounting partitions..."
+log "$LOG_INFO" "Unmounting partitions..."
 sudo umount "$boot_mnt" "$root_mnt" || true
 rmdir "$boot_mnt" "$root_mnt"
+log "$LOG_INFO" "Partitions unmounted and mount points cleaned up"
 
 # Eject the SD card
-log "Ejecting SD card..."
+log "$LOG_INFO" "Ejecting SD card..."
 sudo eject "$sd_card" || true
+log "$LOG_INFO" "SD card ejected"
 
 # Clean up
-log "Cleaning up..."
-log "Removing temporary files..."
+log "$LOG_INFO" "Cleaning up temporary files..."
 
 # Always remove decompressed image file, whether local or downloaded
 if [ -f "$image_file" ]; then
     rm -f "$image_file"
-    log "Removed decompressed image: $image_file"
+    log "$LOG_INFO" "Removed decompressed image: $image_file"
 fi
 
 # Clean up downloaded files if they exist
@@ -976,26 +1008,29 @@ if [ -z "$local_image" ]; then
     if [ -n "$downloaded_xz" ]; then
         rm -f "$downloaded_xz"
     fi
+    log "$LOG_INFO" "Downloaded files cleaned up"
 fi
 
 # Clean up any other temporary files that might exist
 rm -f "raspios-lite-latest.img" "*.log" "*.tmp" 2>/dev/null || true
 
-log "Cleanup completed. Only original image files remain."
+log "$LOG_INFO" "Cleanup completed. Only original image files remain."
 
 # Remove trap since we're exiting normally
 trap - EXIT
 
-log "SD card has been formatted, flashed, and configured successfully!"
-log "You can now remove the SD card and insert it into your Raspberry Pi."
+log "$LOG_INFO" "SD card has been formatted, flashed, and configured successfully!"
+log "$LOG_INFO" "You can now remove the SD card and insert it into your Raspberry Pi."
 if [ -n "$static_ip" ]; then
-    log "Try SSH with: ssh $username@$static_ip"
+    log "$LOG_INFO" "Try SSH with: ssh $username@$static_ip"
 else
-    log "Try SSH with: ssh $username@<Raspberry Pi IP>"
+    log "$LOG_INFO" "Try SSH with: ssh $username@<Raspberry Pi IP>"
 fi
 
 # Set flash status to success
 last_flash_status="success"
+log "$LOG_INFO" "Flash operation completed successfully"
 
 # Persist configuration for next run
 write_config
+log "$LOG_INFO" "Final configuration saved"
